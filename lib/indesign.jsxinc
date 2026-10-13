@@ -1,0 +1,323 @@
+var IIOAdobe = (function(C){
+    var A={tolerance:0.01,marker:'IIO.optimized.v1'};
+    A.path=function(f){return C.key(f.fsName);};
+    A.mkdir=function(folder){C.assert(folder.exists || folder.create(),'Nelze vytvorit slozku: '+folder.fsName);return folder;};
+    A.write=function(file,text,append){
+        file.encoding='UTF-8';C.assert(file.open(append?'a':'w'),'Nelze otevrit zapis: '+file.fsName);
+        try{C.assert(file.write(text),'Chyba zapisu: '+file.fsName);}finally{file.close();}
+    };
+    A.read=function(file){file.encoding='UTF-8';C.assert(file.open('r'),'Nelze cist: '+file.fsName);try{return file.read();}finally{file.close();}};
+    A.equalFiles=function(left,right,pulse){
+        left=new File(left.fsName);right=new File(right.fsName);
+        if(!left.exists||!right.exists||left.length!==right.length||left.length===0){return false;}
+        left.encoding=right.encoding='BINARY';
+        if(!left.open('r')){return false;}
+        if(!right.open('r')){left.close();return false;}
+        try{
+            while(!left.eof){if(left.read(1024*1024)!==right.read(1024*1024)){return false;}if(pulse){pulse();}}
+            return right.eof && !left.error && !right.error;
+        }finally{left.close();right.close();}
+    };
+    A.copyVerified=function(source,dest,pulse){
+        C.assert(!dest.exists,'Cil kopie uz existuje: '+dest.fsName);
+        C.assert(source.copy(dest.fsName),'Kopie selhala: '+source.fsName);
+        C.assert(A.equalFiles(source,dest,pulse),'Binarni overeni kopie selhalo: '+dest.fsName);
+    };
+    A.corners=function(item){
+        var anchors=[AnchorPoint.TOP_LEFT_ANCHOR,AnchorPoint.TOP_RIGHT_ANCHOR,AnchorPoint.BOTTOM_LEFT_ANCHOR,AnchorPoint.BOTTOM_RIGHT_ANCHOR],p=[],i,q;
+        for(i=0;i<anchors.length;i++){
+            q=item.resolve(anchors[i],CoordinateSpaces.INNER_COORDINATES,false)[0];
+            p.push(item.resolve([q,CoordinateSpaces.INNER_COORDINATES],CoordinateSpaces.PASTEBOARD_COORDINATES,false)[0]);
+        }
+        C.inverse(C.basis(p));return p;
+    };
+    function props(obj){
+        var p=obj.properties, keys=[],k,out={},v,i;
+        for(k in p){if(k!=='parent' && k!=='isValid' && k!=='properties' && typeof p[k]!=='function'){keys.push(k);}}
+        keys.sort();
+        for(i=0;i<keys.length;i++){k=keys[i];v=p[k];out[k]=typeof v==='number'||typeof v==='boolean'||typeof v==='string'?v:String(v);}
+        return out;
+    }
+    A.effects=function(item){
+        var out={}, groups=['transparencySettings','fillTransparencySettings','strokeTransparencySettings','contentTransparencySettings'],
+            children=['blendingSettings','dropShadowSettings','innerShadowSettings','outerGlowSettings','innerGlowSettings','bevelAndEmbossSettings','satinSettings','directionalFeatherSettings','gradientFeatherSettings','featherSettings'],i,j,t;
+        for(i=0;i<groups.length;i++){
+            t=item[groups[i]];out[groups[i]]={};
+            for(j=0;j<children.length;j++){out[groups[i]][children[j]]=props(t[children[j]]);}
+        }
+        return C.json(out);
+    };
+    A.snapshot=function(g){
+        var f=g.parent, paths=[],i;
+        for(i=0;i<f.paths.length;i++){paths.push(f.paths[i].entirePath);}
+        return {id:g.id,parent:f.id,corners:A.corners(g),frame:A.corners(f),paths:paths,
+            imageEffects:A.effects(g),frameEffects:A.effects(f),
+            frameMatrix:f.transformValuesOf(CoordinateSpaces.PASTEBOARD_COORDINATES)[0].matrixValues,
+            imageMatrix:g.transformValuesOf(CoordinateSpaces.PASTEBOARD_COORDINATES)[0].matrixValues,
+            scales:[g.horizontalScale,g.verticalScale],autoFit:f.frameFittingOptions.autoFit,
+            clip:String(g.clippingPath.clippingType),render:String(g.imageRenderingIntent),
+            label:g.extractLabel(A.marker)};
+    };
+    A.sameGeometry=function(before,after){
+        return before.parent===after.parent &&
+            C.close(before.corners,after.corners,A.tolerance) && C.close(before.frame,after.frame,A.tolerance) &&
+            C.close(before.paths,after.paths,A.tolerance) && C.close(before.frameMatrix,after.frameMatrix,1e-7) &&
+            before.imageEffects===after.imageEffects && before.frameEffects===after.frameEffects &&
+            before.autoFit===after.autoFit && before.clip===after.clip && before.render===after.render;
+    };
+    function safeGraphic(g){
+        var f=g.parent,p=f,i,layers;
+        C.assert(g.constructor.name==='Image','Neni rastrovy objekt Image.');
+        C.assert(f.paths && f.frameFittingOptions,'Nepodporovany rodicovsky objekt.');
+        C.assert(!g.locked && !g.itemLayer.locked,'Zamceny obrazek nebo vrstva.');
+        while(p && p.constructor.name!=='Document'){
+            C.assert(p.constructor.name!=='Character','Ukotvene obrazky zatim nejsou podporovane.');
+            if(p.constructor.name==='Spread'||p.constructor.name==='MasterSpread'||p.constructor.name==='Page'){break;}
+            C.assert(!p.locked,'Zamceny nadrazeny objekt.');
+            p=p.parent;
+        }
+        C.assert(g.clippingPath.clippingType===ClippingPathType.NONE,'Orezova cesta vyzaduje rucni kontrolu; preskoceno.');
+        C.assert(g.textWrapPreferences.textWrapMode===TextWrapModes.NONE && f.textWrapPreferences.textWrapMode===TextWrapModes.NONE,'Obtekani textu vyzaduje rucni kontrolu; preskoceno.');
+        function noOverrides(collection){for(var j=0;j<collection.length;j++){var layer=collection[j];C.assert(layer.currentVisibility===layer.originalVisibility,'Prepis viditelnosti PSD vrstev; preskoceno.');noOverrides(layer.graphicLayers);}}
+        layers=g.graphicLayerOptions.graphicLayers;noOverrides(layers);
+    }
+    A.analyze=function(doc,settings,selection){
+        C.assert(doc.isValid && doc.saved,'Dokument musi byt ulozeny.');
+        var all=doc.allGraphics, selected={},i,j,g,l,r,src,plan={items:[],skipped:[],sources:{},docID:doc.id,docPath:doc.fullName.fsName},used={},n,out,base,k,ss;
+        if(settings.selected){
+            for(i=0;i<selection.length;i++){
+                ss=selection[i];if(ss.constructor.name==='Image'){selected['g'+ss.id]=true;}
+                try{for(j=0;j<ss.allGraphics.length;j++){selected['g'+ss.allGraphics[j].id]=true;}}catch(ignore){}
+            }
+            C.assert(selection.length>0,'Neni vybrany zadny objekt.');
+        }
+        for(i=0;i<all.length;i++){
+            g=all[i];r={id:g.id,name:'Objekt '+g.id};
+            try{
+                l=g.itemLink;if(l && l.isValid){r.name=l.name;}
+                if(settings.selected && !selected['g'+g.id]){throw new Error('Mimo vyber.');}
+                C.assert(l && l.isValid,'Vlozeny objekt nebo objekt bez odkazu.');
+                C.assert(l.status===LinkStatus.NORMAL,'Odkaz neni aktualni, je vlozeny nebo chybi: '+String(l.status));
+                src=new File(l.filePath);C.assert(C.raster(src.name),'Nepodporovany nebo vektorovy format.');
+                C.assert(src.exists && !src.alias,'Zdroj chybi nebo je alias.');
+                C.assert(!g.extractLabel(A.marker) && !(new File(src.fsName+'.iio')).exists,'Jiz optimalizovany vystup.');
+                safeGraphic(g);r.graphic=g;r.linkID=l.id;r.source=src;r.sourceKey=A.path(src);
+                r.ppi=[Number(g.effectivePpi[0]),Number(g.effectivePpi[1])];r.factor=C.factor(r.ppi[0],r.ppi[1],settings.ppi);
+                r.snapshot=A.snapshot(g);base=C.base(decodeURI(src.name));n=1;
+                do{out=new File(doc.filePath.fsName+'/Links/'+base+'_'+C.pad(n++)+'.psd');k=A.path(out);}while(out.exists || (new File(out.fsName+'.iio')).exists || used[k]);
+                used[k]=true;r.output=out;r.status='naplanovano';r.verified=false;plan.items.push(r);
+                if(!plan.sources[r.sourceKey]){plan.sources[r.sourceKey]={file:src,items:[],backup:null,failed:false};}
+                plan.sources[r.sourceKey].items.push(r);
+            }catch(e){r.reason=String(e);plan.skipped.push({id:r.id,name:r.name,reason:r.reason});}
+        }
+        return plan;
+    };
+    A.bridge=function(target,job,control,timeoutSeconds){
+        var bt=new BridgeTalk(), state={done:false,result:null,error:null},started=new Date().getTime(),cancelled=false,cancelStarted=0;
+        bt.target=target;
+        C.assert(A.sourceRoot,'Chybi cesta k modulům skriptu.');
+        /* Windows BridgeTalk doubles backslashes. Encode owned source before transport. */
+        var source=A.read(new File(A.sourceRoot+'/lib/core.jsxinc'))+'\n'+
+            A.read(new File(A.sourceRoot+'/lib/photoshop.jsxinc'))+'\nIIOPhotoshop('+C.json(job)+',IIO);';
+        bt.body='eval(decodeURIComponent('+C.quote(encodeURIComponent(source))+'));';
+        bt.onResult=function(r){try{state.result=C.parse(r.body);}catch(e){state.error=String(e);}state.done=true;};
+        bt.onError=function(e){state.error=e.body;state.done=true;};
+        bt.send();
+        while(!state.done){
+            BridgeTalk.pump();
+            if(state.done){break;}
+            // The worker writes this only after closing its documents and restoring preferences.
+            // A missing BridgeTalk callback must not keep a completed job waiting.
+            if(job.done && (new File(job.done)).exists){
+                try{
+                    var receipt=C.parse(A.read(new File(job.done)));
+                    if(receipt && typeof receipt.ok==='boolean'){state.result=receipt;state.done=true;break;}
+                }catch(incompleteReceipt){} // The file may still be in the middle of a write.
+            }
+            if(control){
+                control.pulse();
+                if(control.cancelled && job.cancel && !cancelled){
+                    try{A.write(new File(job.cancel),'cancel');}catch(ce){ce.uncertain=true;throw ce;}
+                    cancelled=true;cancelStarted=new Date().getTime();
+                }
+                if(cancelled){
+                    var remaining=Math.max(0,Math.ceil((10000-(new Date().getTime()-cancelStarted))/1000));
+                    control.status('Zruseni: cekam na Photoshop (nejvyse '+remaining+' s).');
+                    if(!remaining){
+                        var stopped=new Error('Zruseno cekani na Photoshop. Worker nepotvrdil konec; muze jeste bezet. Zamek .iio-active zustava.');
+                        stopped.uncertain=true;throw stopped;
+                    }
+                }
+            }
+            if(new Date().getTime()-started>timeoutSeconds*1000){
+                if(job.cancel){A.write(new File(job.cancel),'timeout');}
+                var timeout=new Error('Photoshop neodpovedel v limitu. Davka zastavena; worker muze jeste bezet. Zamek zustava.');timeout.uncertain=true;throw timeout;
+            }
+            $.sleep(50);
+        }
+        if(state.error){var bridgeError=new Error('BridgeTalk: '+state.error);bridgeError.uncertain=true;throw bridgeError;}
+        return state.result;
+    };
+    A.relink=function(doc,item,token){
+        var before=A.snapshot(item.graphic),error=null,started=false,g=item.graphic,frame=g.parent.getElements()[0],sourcePath=A.path(item.source),after;
+        function current(){C.assert(frame.isValid && frame.graphics.length===1,'Nelze jednoznacne najit obrazek v ramecku.');return frame.graphics[0].getElements()[0];}
+        function linkTo(file){g=current();g.itemLink.relink(file);g=current();g.itemLink.update();g=current();item.graphic=g;}
+        C.assert(A.sameGeometry(item.snapshot,before),'Dokument se od nahledu zmenil.');
+        C.assert(A.path(new File(g.itemLink.filePath))===sourcePath,'Odkaz se od nahledu zmenil.');
+        app.doScript(function(){
+            try{
+                g.insertLabel(A.marker,token);started=true;
+                frame.frameFittingOptions.autoFit=false;
+                linkTo(item.output);
+                C.assert(g.isValid && g.parent.id===before.parent,'Relink zmenil identitu objektu.');
+                // Re-enabling Auto-Fit can refit the image. Restore it BEFORE the final correction.
+                g.parent.frameFittingOptions.autoFit=before.autoFit;
+                g.transform(CoordinateSpaces.PASTEBOARD_COORDINATES,[0,0],C.compensate(before.corners,A.corners(g)));
+                after=A.snapshot(g);
+                C.assert(A.sameGeometry(before,after),'Kontrola geometrie nebo efektu po relinku selhala.');
+                C.assert(g.itemLink.status===LinkStatus.NORMAL && A.path(new File(g.itemLink.filePath))===A.path(item.output),'Kontrola odkazu po relinku selhala.');
+            }catch(e){error=new Error(String(e)+' (radek '+e.line+')');}
+        },ScriptLanguage.JAVASCRIPT,undefined,UndoModes.ENTIRE_SCRIPT,'IIO '+token);
+        if(error){
+            try{
+                if(started){
+                    frame.frameFittingOptions.autoFit=false;
+                    linkTo(item.source);
+                    frame.frameFittingOptions.autoFit=before.autoFit;
+                    g.transform(CoordinateSpaces.PASTEBOARD_COORDINATES,[0,0],C.compensate(before.corners,A.corners(g)));
+                    g.insertLabel(A.marker,before.label);
+                }
+                C.assert(A.path(new File(g.itemLink.filePath))===sourcePath && A.sameGeometry(before,A.snapshot(g)) && g.extractLabel(A.marker)===before.label,'Rollback neni uplny.');
+            }catch(rollback){var fatal=new Error(String(error)+' / ROLLBACK SELHAL: '+String(rollback));fatal.fatal=true;throw fatal;}
+            throw error;
+        }
+        item.after=after;return after;
+    };
+    A.references=function(doc,file){
+        var links=doc.links,i,l,n=0;
+        for(i=0;i<links.length;i++){
+            l=links[i];
+            /* Any unreadable path makes deletion indeterminate, even if apparently unrelated. */
+            try{if(A.path(new File(l.filePath))===A.path(file)){n++;}}catch(e){return -1;}
+        }
+        return n;
+    };
+    A.run=function(doc,plan,settings,control,target){
+        var runID=String(new Date().getTime())+'-'+String(Math.floor(Math.random()*1000000)),root=doc.filePath,
+            lock=new Folder(root.fsName+'/.iio-active'),run,backup,links,journal,report={id:runID,success:0,failed:0,cancelled:false,uncertain:false,items:[],skipped:plan.skipped,deletions:[]},
+            i,k,s,item,input,temp,done,result,oldUnits=app.scriptPreferences.measurementUnit,oldEffects=app.transformPreferences.adjustEffectsWhenScaling,
+            oldStroke=app.transformPreferences.adjustStrokeWeightWhenScaling;
+        C.assert(doc.id===plan.docID && doc.fullName.fsName===plan.docPath,'Aktivni dokument se zmenil.');
+        C.assert(!lock.exists,'Projekt ma zamek .iio-active. Viz README: zotaveni po preruseni.');
+        A.mkdir(lock);A.write(new File(lock.fsName+'/owner.txt'),runID);
+        try{
+            backup=A.mkdir(new Folder(root.fsName+'/backup'));
+            run=A.mkdir(new Folder(backup.fsName+'/iio-'+runID));report.folder=run.fsName;
+            journal=new File(run.fsName+'/journal.jsonl');
+            function log(type,data){A.write(journal,C.json({time:new Date().toUTCString(),type:type,data:data})+'\n',true);}
+            log('begin',{document:doc.fullName.fsName,settings:settings,skipped:plan.skipped});
+            links=A.mkdir(new Folder(root.fsName+'/Links'));
+            var documentCopy=new File(run.fsName+'/document-before.indd');
+            doc.saveACopy(documentCopy);C.assert(documentCopy.exists && documentCopy.length>0,'Zaloha INDD selhala.');
+            log('document-backup',{path:documentCopy.fsName});
+            app.scriptPreferences.measurementUnit=MeasurementUnits.POINTS;
+            app.transformPreferences.adjustEffectsWhenScaling=false;app.transformPreferences.adjustStrokeWeightWhenScaling=false;
+            i=0;
+            for(k in plan.sources){if(Object.prototype.hasOwnProperty.call(plan.sources,k)){
+                s=plan.sources[k];control.status('Zaloha: '+decodeURI(s.file.name));control.pulse();if(control.cancelled){break;}
+                try{
+                    var sourceDir=A.mkdir(new Folder(run.fsName+'/source-'+C.pad(++i)));
+                    s.backup=new File(sourceDir.fsName+'/'+s.file.name);
+                    A.copyVerified(s.file,s.backup,function(){control.pulse();});
+                    s.backupVerified=true;
+                    log('backup',{source:s.file.fsName,backup:s.backup.fsName});
+                }catch(be){s.failed=true;s.error=String(be);log('backup-error',{source:s.file.fsName,error:s.error});}
+            }}
+            for(i=0;i<plan.items.length;i++){
+                control.pulse();if(control.cancelled){report.cancelled=true;break;}
+                item=plan.items[i];s=plan.sources[item.sourceKey];control.status((i+1)+'/'+plan.items.length+': '+decodeURI(item.source.name));control.progress(i,plan.items.length);
+                try{
+                    C.assert(s.backupVerified && s.backup && s.backup.exists,s.error || 'Zaloha neni overena.');
+                    C.assert(A.equalFiles(s.file,s.backup,function(){control.pulse();}),'Zdroj se od zalohy zmenil.');
+                    if(control.cancelled){report.cancelled=true;break;}
+                    C.assert(item.graphic.itemLink.status===LinkStatus.NORMAL,'Zdrojovy odkaz uz neni aktualni.');
+                    var workDir=A.mkdir(new Folder(run.fsName+'/work-'+C.pad(i+1)));
+                    input=new File(workDir.fsName+'/'+s.file.name);A.copyVerified(s.backup,input);
+                    temp=new File(links.fsName+'/.iio-'+runID+'-'+C.pad(i+1)+'.psd');
+                    done=new File(workDir.fsName+'/done.json');
+                    log('photoshop-start',{id:item.id,source:s.file.fsName,temp:temp.fsName,output:item.output.fsName});
+                    result=A.bridge(target,{op:'process',id:runID+'-'+i,input:input.fsName,output:temp.fsName,
+                        cancel:lock.fsName+'/cancel',done:done.fsName,factor:item.factor,action:settings.action,set:settings.set},control,settings.timeout);
+                    if(control.cancelled){report.cancelled=true;break;}
+                    if(!result.ok){var pe=new Error(result.error);pe.fatal=result.fatal;throw pe;}
+                    C.assert(temp.exists && temp.length>0 && done.exists,'Chybi overeny vystup nebo potvrzeni workeru.');
+                    item.verificationCopy=new File(workDir.fsName+'/verified-output.psd');
+                    A.copyVerified(temp,item.verificationCopy);
+                    C.assert(A.equalFiles(s.file,s.backup),'Zdroj se behem Photoshop operace zmenil.');
+                    C.assert(!item.output.exists && !(new File(item.output.fsName+'.iio')).exists,'Kolize vystupniho jmena po nahledu.');
+                    /* Marker is reserved first. Orphans are intentionally retained for recovery. */
+                    A.write(new File(item.output.fsName+'.iio'),C.json({format:A.marker,run:runID,source:s.file.fsName,output:item.output.fsName}));
+                    C.assert(temp.rename(item.output.name),'Publikace PSD selhala.');
+                    C.assert(item.output.exists,'Publikovane PSD chybi.');
+                    log('psd-verified',{id:item.id,output:item.output.fsName,metadata:result});
+                    A.relink(doc,item,runID+'-'+i);item.status='uspech';item.verified=true;report.success++;
+                    var entry={id:item.id,source:s.file.fsName,output:item.output.fsName,status:'uspech',
+                        ppiBefore:item.ppi,ppiAfter:[Number(item.graphic.effectivePpi[0]),Number(item.graphic.effectivePpi[1])],
+                        scalesBefore:item.snapshot.scales,scalesAfter:item.after.scales};
+                    report.items.push(entry);log('relinked',entry);
+                }catch(e){
+                    item.status='chyba';s.failed=true;report.failed++;
+                    var err={id:item.id,source:item.source.fsName,status:'chyba',error:String(e)};report.items.push(err);log('item-error',err);
+                    if(e.uncertain){report.uncertain=true;throw e;}if(e.fatal){throw e;}
+                }
+            }
+            report.cancelled=report.cancelled||control.cancelled;
+            report.complete=!report.cancelled && !report.uncertain && report.failed===0 && report.success===plan.items.length;
+            log('batch-end',{complete:report.complete,success:report.success,failed:report.failed,cancelled:report.cancelled});
+        }catch(e){report.error=String(e);report.uncertain=report.uncertain||!!e.uncertain;report.complete=false;}
+        finally{
+            report.cancelled=report.cancelled||control.cancelled;
+            app.scriptPreferences.measurementUnit=oldUnits;app.transformPreferences.adjustEffectsWhenScaling=oldEffects;app.transformPreferences.adjustStrokeWeightWhenScaling=oldStroke;
+            if(report.folder){try{A.write(new File(report.folder+'/report.json'),C.json(report));}catch(re){report.error=(report.error||'')+' Report nelze ulozit: '+String(re);report.complete=false;}}
+            if(!report.uncertain){
+                var cancelFile=new File(lock.fsName+'/cancel'),ownerFile=new File(lock.fsName+'/owner.txt');
+                if(cancelFile.exists){cancelFile.remove();}if(ownerFile.exists){ownerFile.remove();}lock.remove();
+            }
+        }
+        control.progress(plan.items.length,plan.items.length);return report;
+    };
+    A.deletionCandidates=function(doc,plan,report){
+        var list=[],k,s,i,j,ok,other;
+        if(!report.complete){return list;}
+        for(k in plan.sources){if(Object.prototype.hasOwnProperty.call(plan.sources,k)){
+            s=plan.sources[k];ok=!s.failed;other=false;
+            for(i=0;i<s.items.length;i++){
+                var r=s.items[i];ok=ok && r.verified && r.output.exists && r.graphic.isValid &&
+                    r.graphic.itemLink.status===LinkStatus.NORMAL && A.path(new File(r.graphic.itemLink.filePath))===A.path(r.output) &&
+                    r.verificationCopy && A.equalFiles(r.output,r.verificationCopy);
+            }
+            for(j=0;j<app.documents.length;j++){if(app.documents[j].id!==doc.id && A.references(app.documents[j],s.file)!==0){other=true;}}
+            if(C.deletable({batchComplete:report.complete,verifiedBackup:s.backup && A.equalFiles(s.file,s.backup),
+                outputsVerified:ok,allOccurrencesDone:ok,noReferences:A.references(doc,s.file)===0,
+                directChild:A.path(s.file.parent)===A.path(new Folder(doc.filePath.fsName+'/Links')),
+                raster:C.raster(s.file.name),alias:s.file.alias,otherDocumentUse:other})){list.push(s);}
+        }}return list;
+    };
+    A.deleteConfirmed=function(doc,plan,report,candidates){
+        C.assert(report.complete,'Neuplna davka nesmi mazat.');
+        doc.save();C.assert(!doc.modified,'INDD neni ulozen.');
+        var fresh=A.deletionCandidates(doc,plan,report),allowed={},i,s;
+        for(i=0;i<fresh.length;i++){allowed[A.path(fresh[i].file)]=true;}
+        for(i=0;i<candidates.length;i++){
+            s=candidates[i];
+            if(allowed[A.path(s.file)] && A.references(doc,s.file)===0 && A.equalFiles(s.file,s.backup)){
+                /* Write intent before deletion; fail closed if durable logging is unavailable. */
+                A.write(new File(report.folder+'/journal.jsonl'),C.json({type:'delete-intent',source:s.file.fsName,backup:s.backup.fsName})+'\n',true);
+                var ok=s.file.remove();report.deletions.push({source:s.file.fsName,deleted:ok});
+                A.write(new File(report.folder+'/journal.jsonl'),C.json({type:'delete-result',source:s.file.fsName,deleted:ok})+'\n',true);
+            }
+        }
+        A.write(new File(report.folder+'/report.json'),C.json(report));
+    };
+    return A;
+})(IIO);

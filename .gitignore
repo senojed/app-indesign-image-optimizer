@@ -1,0 +1,11 @@
+.firecrawl/
+tests/artifacts/
+dist/
+*.log
+
+# Local development history and private reports
+docs/local-history/
+docs/ZADANI.md
+docs/GEOMETRY-DIAGNOSTIC.md
+docs/test-results.json
+*.bak

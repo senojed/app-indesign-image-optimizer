@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.jsx text eol=lf
+*.jsxinc text eol=lf
+*.ps1 text eol=lf
+*.zip binary

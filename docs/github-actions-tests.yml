@@ -1,0 +1,21 @@
+name: Tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  node:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node scripts/build-english.cjs --check
+      - run: node tests/core.test.cjs
+      - run: node tests/worker.test.cjs
+      - run: node tests/bridge.test.cjs
+      - run: node tests/ui.test.cjs
+      - run: node tests/english.test.cjs
+      - run: powershell -ExecutionPolicy Bypass -File scripts/package.ps1

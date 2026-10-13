@@ -1,0 +1,77 @@
+/* ES3-only helpers shared by ExtendScript and the Node test harness. */
+function IIOCoreFactory() {
+    var C = {};
+    C.assert = function (ok, message) { if (!ok) { throw new Error(message); } };
+    C.key = function (path) { return String(path).replace(/\\/g, '/').toLowerCase(); };
+    C.raster = function (name) { return /\.(psd|psb|tif|tiff|jpg|jpeg|jpe|png|bmp|gif|tga)$/i.test(name); };
+    C.factor = function (x, y, limit) {
+        C.assert(isFinite(x) && isFinite(y) && x > 0 && y > 0 && isFinite(limit) && limit > 0, 'Neplatne PPI.');
+        return Math.min(1, limit / Math.max(x, y));
+    };
+    C.dimensions = function (w, h, s) {
+        C.assert(w > 0 && h > 0 && s > 0 && s <= 1, 'Neplatne rozmery.');
+        var a = Math.floor(w * s + 1e-8), b = Math.floor(h * s + 1e-8);
+        C.assert(a >= 1 && b >= 1, 'Cilovy rozmer by byl mensi nez 1 pixel.');
+        return [a, b];
+    };
+    C.mul = function (a, b) {
+        return [a[0]*b[0]+a[2]*b[1], a[1]*b[0]+a[3]*b[1],
+            a[0]*b[2]+a[2]*b[3], a[1]*b[2]+a[3]*b[3],
+            a[0]*b[4]+a[2]*b[5]+a[4], a[1]*b[4]+a[3]*b[5]+a[5]];
+    };
+    C.inverse = function (a) {
+        var d = a[0]*a[3]-a[1]*a[2];
+        C.assert(isFinite(d) && Math.abs(d) > 1e-12, 'Singularni transformace.');
+        return [a[3]/d,-a[1]/d,-a[2]/d,a[0]/d,(a[2]*a[5]-a[3]*a[4])/d,(a[1]*a[4]-a[0]*a[5])/d];
+    };
+    C.basis = function (p) { return [p[1][0]-p[0][0],p[1][1]-p[0][1],p[2][0]-p[0][0],p[2][1]-p[0][1],p[0][0],p[0][1]]; };
+    C.compensate = function (before, after) { return C.mul(C.basis(before),C.inverse(C.basis(after))); };
+    C.close = function (a,b,tol) {
+        if (a instanceof Array && b instanceof Array) {
+            if (a.length !== b.length) { return false; }
+            for (var i=0;i<a.length;i++) { if (!C.close(a[i],b[i],tol)) { return false; } }
+            return true;
+        }
+        return typeof a === 'number' && typeof b === 'number' ? isFinite(a) && isFinite(b) && Math.abs(a-b)<=tol : a===b;
+    };
+    C.pad = function (n) { var s=String(n); while(s.length<3){s='0'+s;} return s; };
+    C.base = function (name) { return String(name).replace(/\.[^.]*$/, '').replace(/[<>:"\/\\|?*\x00-\x1f]/g,'_').replace(/[. ]+$/g,'').substr(0,90) || 'image'; };
+    C.quote = function (s) {
+        return '"'+String(s).replace(/["\\\x00-\x1f\u2028\u2029]/g,function(c){
+            if(c==='"'||c==='\\'){return '\\'+c;}
+            var h=c.charCodeAt(0).toString(16);while(h.length<4){h='0'+h;}return '\\u'+h;
+        })+'"';
+    };
+    C.json = function (v) {
+        if(v===null){return 'null';}
+        var t=typeof v, a=[], k, i;
+        if(t==='string'){return C.quote(v);}
+        if(t==='number'){C.assert(isFinite(v),'Non-finite JSON');return String(v);}
+        if(t==='boolean'){return String(v);}
+        if(v instanceof Array){for(i=0;i<v.length;i++){a.push(C.json(v[i]));}return '['+a.join(',')+']';}
+        C.assert(t==='object','Unsupported JSON value');
+        for(k in v){if(Object.prototype.hasOwnProperty.call(v,k)){a.push(C.quote(k)+':'+C.json(v[k]));}}
+        return '{'+a.join(',')+'}';
+    };
+    /* Deliberately no eval on BridgeTalk responses or files. */
+    C.parse = function (s) {
+        var p=0;
+        function ws(){while(/\s/.test(s.charAt(p)) && p<s.length){p++;}}
+        function str(){var out='',c,h;C.assert(s.charAt(p++)==='"','JSON string');while(p<s.length){c=s.charAt(p++);if(c==='"'){return out;}if(c==='\\'){c=s.charAt(p++);if(c==='u'){h=s.substr(p,4);C.assert(/^[0-9a-f]{4}$/i.test(h),'JSON escape');out+=String.fromCharCode(parseInt(h,16));p+=4;}else{C.assert('"\\/bfnrt'.indexOf(c)>=0 && c.length===1,'JSON escape');out+=c==='b'?'\b':c==='f'?'\f':c==='n'?'\n':c==='r'?'\r':c==='t'?'\t':c;}}else{C.assert(c.charCodeAt(0)>=32,'JSON control');out+=c;}}throw new Error('Unterminated JSON');}
+        function val(depth){C.assert(depth<80,'JSON depth');ws();var c=s.charAt(p),o,k,m;
+            if(c==='"'){return str();}
+            if(c==='{'||c==='['){p++;o=c==='{'?{}:[];ws();if(s.charAt(p)===(c==='{'?'}':']')){p++;return o;}while(true){ws();if(c==='{'){k=str();C.assert(k!=='__proto__'&&k!=='constructor'&&k!=='prototype','JSON key');ws();C.assert(s.charAt(p++)===':','JSON colon');o[k]=val(depth+1);}else{o.push(val(depth+1));}ws();k=s.charAt(p++);if(k===(c==='{'?'}':']')){return o;}C.assert(k===',','JSON comma');}}
+            if(s.substr(p,4)==='true'){p+=4;return true;}
+            if(s.substr(p,5)==='false'){p+=5;return false;}
+            if(s.substr(p,4)==='null'){p+=4;return null;}
+            m=/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(s.substring(p));C.assert(m,'JSON value');
+            var numberText=String(m[0]);p+=numberText.length;var numeric=Number(numberText);C.assert(isFinite(numeric),'JSON number');return numeric;
+        }
+        var result=val(0);ws();C.assert(p===s.length,'JSON trailing data');return result;
+    };
+    C.deletable = function (s) {
+        return s.batchComplete && s.verifiedBackup && s.outputsVerified && s.allOccurrencesDone && s.noReferences && s.directChild && s.raster && !s.alias && !s.otherDocumentUse;
+    };
+    return C;
+}
+var IIO = IIOCoreFactory();

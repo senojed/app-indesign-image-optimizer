@@ -1,0 +1,128 @@
+function IIOUI(dialogDriver){
+    var C=IIO,A=IIOAdobe;
+    C.assert(app.documents.length>0,'Neni otevreny dokument.');
+    var doc=app.activeDocument,selection=app.selection.slice(0),target=BridgeTalk.getSpecifier('photoshop');
+    C.assert(doc.saved,'Nejprve ulozte dokument INDD.');
+    C.assert(target,'Photoshop neni dostupny pres BridgeTalk. Spustte Photoshop a zkuste to znovu.');
+    var settings,plan=null,sets=[],row;
+    // Plain data survives Window.close(); native controls do not.
+    var ui={ppi:'430',scope:0,mode:0,setIndex:0,actionIndex:0,manualSet:'',manualAction:'',
+        trust:false,timeout:'300',remove:false,preview:'Kliknete na Nahled.',status:'Pripraveno.'};
+    function createDialog(){
+        var w=new Window('dialog','InDesign Image Optimizer');
+        w.orientation='column';w.alignChildren='fill';
+        var row=w.add('group');row.add('statictext',undefined,'Max. efektivni PPI:');var ppi=row.add('edittext',undefined,ui.ppi);ppi.characters=7;
+        row.add('statictext',undefined,'Rozsah:');var scope=row.add('dropdownlist',undefined,['Cely dokument','Vybrane obrazky']);scope.selection=ui.scope;
+        var actionPanel=w.add('panel',undefined,'Photoshop Action');actionPanel.alignChildren='fill';
+        row=actionPanel.add('group');var mode=row.add('dropdownlist',undefined,['Bez akce','Vybrat ze seznamu','Zadat rucne']);mode.selection=ui.mode;
+        var load=row.add('button',undefined,'Nacist sady z Photoshopu');
+        row=actionPanel.add('group');row.add('statictext',undefined,'Sada:');var setList=row.add('dropdownlist',undefined,[]);setList.preferredSize.width=260;
+        row.add('statictext',undefined,'Akce:');var actionList=row.add('dropdownlist',undefined,[]);actionList.preferredSize.width=260;
+        row=actionPanel.add('group');row.add('statictext',undefined,'Presna sada:');var manualSet=row.add('edittext',undefined,ui.manualSet);manualSet.characters=25;
+        row.add('statictext',undefined,'Presna akce:');var manualAction=row.add('edittext',undefined,ui.manualAction);manualAction.characters=25;
+        var trust=actionPanel.add('checkbox',undefined,'Akce je overena: bez Save/Save As, otevirani, zavirani a externich skriptu.');trust.value=ui.trust;
+        var note=actionPanel.add('statictext',undefined,'Akce neni sandbox. Muze menit soubory. Pred jejim pouzitim zavrete ostatni dokumenty Photoshopu.',{multiline:true});note.preferredSize.height=32;
+        row=w.add('group');row.add('statictext',undefined,'Timeout Photoshopu na obrazek (s):');var timeout=row.add('edittext',undefined,ui.timeout);timeout.characters=6;
+        var remove=w.add('checkbox',undefined,'Po uspesne davce nabidnout smazani originalu z Links (s dalsim potvrzenim).');remove.value=ui.remove;
+        var explanation=w.add('statictext',undefined,'PPI limit plati pro vyssi osu. Nizsi osa muze klesnout pod limit. Procenta meritka se zmeni, fyzicka geometrie zustane.',{multiline:true});explanation.preferredSize.height=30;
+        var preview=w.add('edittext',undefined,ui.preview,{multiline:true,readonly:true,scrolling:true});preview.preferredSize=[880,300];
+        var state=w.add('statictext',undefined,ui.status);
+        row=w.add('group');var previewButton=row.add('button',undefined,'Nahled'),start=row.add('button',undefined,'Start'),closeButton=row.add('button',undefined,'Zavrit',{name:'cancel'});start.enabled=!!plan && plan.items.length>0;
+        function invalidate(){plan=null;start.enabled=false;ui.status=state.text='Nastaveni zmeneno. Obnovte nahled.';}
+        function enableMode(){setList.enabled=actionList.enabled=mode.selection.index===1;manualSet.enabled=manualAction.enabled=mode.selection.index===2;trust.enabled=mode.selection.index!==0;}
+        function populateActions(index){
+            actionList.removeAll();
+            if(setList.selection){var list=sets[setList.selection.index].actions;for(var i=0;i<list.length;i++){actionList.add('item',list[i]);}if(list.length){actionList.selection=Math.min(index,list.length-1);}}
+        }
+        // Restore values before assigning handlers: rebuilding must not invalidate a valid plan.
+        for(var i=0;i<sets.length;i++){setList.add('item',sets[i].name || '(Sada bez nazvu)');}
+        if(sets.length){setList.selection=Math.min(ui.setIndex,sets.length-1);}
+        populateActions(ui.actionIndex);enableMode();
+        function capture(){
+            ui.ppi=ppi.text;ui.scope=scope.selection.index;ui.mode=mode.selection.index;
+            ui.setIndex=setList.selection?setList.selection.index:0;ui.actionIndex=actionList.selection?actionList.selection.index:0;
+            ui.manualSet=manualSet.text;ui.manualAction=manualAction.text;ui.trust=trust.value;ui.timeout=timeout.text;ui.remove=remove.value;
+        }
+        function readSettings(){
+            var n=Number(ppi.text.replace(',','.')),t=Number(timeout.text),s='',a='';
+            C.assert(isFinite(n)&&n>=1&&n<=100000,'PPI musi byt 1 az 100000.');
+            C.assert(isFinite(t)&&t>=10&&t<=7200,'Timeout musi byt 10 az 7200 sekund.');
+            if(mode.selection.index===1){C.assert(setList.selection&&actionList.selection,'Vyberte sadu i akci.');s=sets[setList.selection.index].name;a=actionList.selection.text;}
+            if(mode.selection.index===2){s=manualSet.text;a=manualAction.text;C.assert(s.length&&a.length,'Vyplnte presny nazev sady i akce.');}
+            C.assert(!a||trust.value,'Potvrdte, ze jste overili bezpecnost vybrane akce.');
+            return {ppi:n,selected:scope.selection.index===1,set:s,action:a,timeout:t,offerDelete:remove.value};
+        }
+        // ScriptUI reserves return code 2 for Cancel/Escape; never use it for a command.
+        closeButton.onClick=function(){w.close(0);};
+        load.onClick=function(){capture();w.close(11);};
+        ppi.onChanging=timeout.onChanging=manualSet.onChanging=manualAction.onChanging=invalidate;
+        scope.onChange=actionList.onChange=invalidate;trust.onClick=remove.onClick=invalidate;
+        mode.onChange=function(){enableMode();invalidate();};
+        setList.onChange=function(){populateActions(0);invalidate();};
+        previewButton.onClick=function(){try{settings=readSettings();capture();w.close(10);}catch(e){invalidate();alert(String(e));}};
+        start.onClick=function(){if(plan){capture();w.close(1);}};
+        return w;
+    }
+    function loadActions(automatic){
+        plan=null;
+        try{
+            var r=A.bridge(target,{op:'actions'},null,automatic?5:30);C.assert(r.ok,r.error);sets=r.sets;
+            ui.setIndex=0;ui.actionIndex=0;
+            ui.status='Photoshop '+r.version+': '+sets.length+' sad. Lze take zadat nazvy rucne.';
+        }catch(e){ui.status='Nacteni sad selhalo. Zkuste tlacitko Nacist sady nebo rucni zadani.';if(!automatic){alert(String(e));}}
+    }
+    function buildPreview(){
+        var units=app.scriptPreferences.measurementUnit;
+        try{
+            C.assert(app.activeDocument.id===doc.id,'Aktivni dokument se zmenil. Spustte skript znovu.');
+            app.scriptPreferences.measurementUnit=MeasurementUnits.POINTS;
+            plan=A.analyze(doc,settings,selection);var lines=[],i,r;
+            lines.push('Zdroj | PPI X/Y -> planovane X/Y (pred zaokrouhlenim pixelu) | vystup');
+            for(i=0;i<plan.items.length;i++){r=plan.items[i];lines.push(decodeURI(r.source.name)+' | '+r.ppi[0].toFixed(1)+'/'+r.ppi[1].toFixed(1)+' -> '+(r.ppi[0]*r.factor).toFixed(1)+'/'+(r.ppi[1]*r.factor).toFixed(1)+' | '+decodeURI(r.output.name)+' | zaloha: pred zpracovanim | relink: planovan');}
+            lines.push('\nPRESKOCENO:');for(i=0;i<plan.skipped.length;i++){r=plan.skipped[i];lines.push(r.name+': '+r.reason);}
+            ui.preview=lines.join('\n');ui.status=plan.items.length+' ke zpracovani, '+plan.skipped.length+' preskoceno.';
+        }catch(e){plan=null;ui.status='Nahled selhal. Obnovte nahled.';alert(String(e));}finally{app.scriptPreferences.measurementUnit=units;}
+    }
+    // Enumerate only an already running Photoshop, before opening a modal dialog.
+    if(BridgeTalk.isRunning(target)){loadActions(true);}
+    // Each native dialog is shown once. No controls are read or updated after close().
+    while(true){
+        var dialog=createDialog(),command=dialogDriver?dialogDriver(dialog):dialog.show();
+        if(command===10){buildPreview();}
+        else if(command===11){loadActions();}
+        else if(command===1 && plan){break;}
+        else{return;}
+    }
+    var p=new Window('palette','Image Optimizer - prubeh');p.orientation='column';p.alignChildren='fill';
+    var label=p.add('statictext',undefined,'Zalohuji...');label.preferredSize.width=560;
+    var bar=p.add('progressbar',undefined,0,plan.items.length),stop=p.add('button',undefined,'Zrusit po bezpecnem dokonceni kroku');
+    var control={cancelled:false,pulse:function(){p.update();},status:function(t){label.text=t;p.update();},progress:function(n,total){bar.maxvalue=total;bar.value=n;p.update();}};
+    stop.onClick=function(){control.cancelled=true;stop.enabled=false;label.text='Zruseni pozadovano; cekam na bezpecny bod.';};
+    p.onClose=function(){control.cancelled=true;return false;};p.show();
+    var report;
+    try{report=A.run(doc,plan,settings,control,target);}finally{p.onClose=null;p.close();}
+    if(settings.offerDelete && report.complete){
+        try{
+            var candidates=A.deletionCandidates(doc,plan,report);
+            if(candidates.length){
+                var d=new Window('dialog','Potvrdit odstraneni originalu');d.alignChildren='fill';
+                var warning=d.add('statictext',undefined,'Tyto soubory mohou pouzivat i jine ZAVRENE dokumenty. Skript to nedokaze overit.\nPotvrzenim se nejprve ulozi aktualni INDD a potom se odstrani uvedene originaly. Overene zalohy zustanou.',{multiline:true});warning.preferredSize=[700,65];
+                var names=[];for(var n=0;n<candidates.length;n++){names.push(candidates[n].file.fsName);}
+                d.add('edittext',undefined,names.join('\n'),{multiline:true,readonly:true,scrolling:true}).preferredSize=[700,220];
+                var consent=d.add('checkbox',undefined,'Overil jsem pouziti souboru v ostatnich projektech a souhlasim s odstranenim.');
+                row=d.add('group');var yes=row.add('button',undefined,'Ulozit INDD a odstranit');row.add('button',undefined,'Ponechat originaly',{name:'cancel'});yes.enabled=false;
+                consent.onClick=function(){yes.enabled=consent.value;};yes.onClick=function(){d.close(1);};
+                if(d.show()===1){A.deleteConfirmed(doc,plan,report,candidates);}
+            }
+        }catch(de){report.error=(report.error||'')+' Mazani nedokonceno: '+String(de);}
+    }
+    var finalWindow=new Window('dialog','Image Optimizer — report');finalWindow.alignChildren='fill';
+    var text='Uspesne: '+report.success+'\nChyby: '+report.failed+'\nPreskoceno: '+report.skipped.length+'\nZruseno: '+(report.cancelled?'ano':'ne')+'\n';
+    if(report.error){text+='\n'+report.error+'\n';}
+    text+='\nReport a zaloha INDD: '+(report.folder||'nevytvoreny')+'\n';
+    text+='Pokud nebylo potvrzeno mazani, ulozte vysledny INDD rucne.\n';
+    if(report.uncertain){text+='Photoshop muze stale pracovat. Pred dalsim spustenim postupujte podle README (zamek .iio-active).\n';}
+    for(var q=0;q<report.items.length;q++){var e=report.items[q];text+='\n'+e.source+': '+e.status+(e.error?' — '+e.error:'');}
+    finalWindow.add('edittext',undefined,text,{multiline:true,readonly:true,scrolling:true}).preferredSize=[800,360];
+    finalWindow.add('button',undefined,'Zavrit',{name:'ok'});finalWindow.show();
+}
